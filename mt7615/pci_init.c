@@ -25,6 +25,8 @@ static void mt7615_init_work(struct work_struct *work)
 	mt7615_phy_init(dev);
 	mt7615_mcu_del_wtbl_all(dev);
 	mt7615_check_offload_capability(dev);
+	if (dev->mt76.phy2)
+		mt7615_register_ext_phy(dev);
 }
 
 static int mt7615_init_hardware(struct mt7615_dev *dev)
