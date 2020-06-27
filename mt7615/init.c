@@ -385,7 +385,7 @@ int mt7615_register_ext_phy(struct mt7615_dev *dev)
 	if (test_bit(MT76_STATE_RUNNING, &dev->mphy.state))
 		return -EINVAL;
 
-	if (phy)
+	if (phy && phy != &dev->phy)
 		return 0;
 
 	mt7615_cap_dbdc_enable(dev);
