@@ -243,7 +243,6 @@ struct mt7615_dev {
 	};
 
 	const struct mt76_bus_ops *bus_ops;
-	struct tasklet_struct irq_tasklet;
 
 	struct mt7615_phy phy;
 	u32 omac_mask;
@@ -461,10 +460,13 @@ static inline bool is_mt7611(struct mt76_dev *dev)
 
 static inline void mt7615_irq_enable(struct mt7615_dev *dev, u32 mask)
 {
-	mt76_set_irq_mask(&dev->mt76, 0, 0, mask);
-
-	tasklet_schedule(&dev->irq_tasklet);
+	mt76_set_irq_mask(&dev->mt76, MT_INT_MASK_CSR, 0, mask);
 }
+
+static inline void mt7615_irq_disable(struct mt7615_dev *dev, u32 mask)
+{
+	mt76_set_irq_mask(&dev->mt76, MT_INT_MASK_CSR, mask, 0);
+ }
 
 static inline bool mt7615_firmware_offload(struct mt7615_dev *dev)
 {
