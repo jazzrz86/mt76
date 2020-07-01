@@ -34,6 +34,10 @@ static int mt7615_pci_probe(struct pci_dev *pdev,
 
 	pci_set_master(pdev);
 
+	ret = pci_alloc_irq_vectors(pdev, 1, 1, PCI_IRQ_ALL_TYPES);
+	if (ret < 0)
+		return ret;
+
 	ret = pci_set_dma_mask(pdev, DMA_BIT_MASK(32));
 	if (ret)
 		goto error;
@@ -60,6 +64,7 @@ static void mt7615_pci_remove(struct pci_dev *pdev)
 
 	mt7615_unregister_device(dev);
 	devm_free_irq(&pdev->dev, pdev->irq, dev);
+	pci_free_irq_vectors(pdev);
 }
 
 #ifdef CONFIG_PM
