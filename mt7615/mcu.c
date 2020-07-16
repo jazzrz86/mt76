@@ -146,7 +146,10 @@ void mt7615_mcu_fill_msg(struct mt7615_dev *dev, struct sk_buff *skb,
 		mcu_txd->cid = mcu_cmd;
 		break;
 	case MCU_CE_PREFIX:
-		mcu_txd->set_query = MCU_Q_SET;
+		if (cmd & MCU_QUERY_MASK)
+			mcu_txd->set_query = MCU_Q_QUERY;
+		else
+			mcu_txd->set_query = MCU_Q_SET;
 		mcu_txd->cid = mcu_cmd;
 		break;
 	default:
@@ -183,8 +186,10 @@ mt7615_mcu_parse_response(struct mt7615_dev *dev, int cmd,
 	struct mt7615_mcu_rxd *rxd = (struct mt7615_mcu_rxd *)skb->data;
 	int ret = 0;
 
-	if (seq != rxd->seq)
-		return -EAGAIN;
+	if (seq != rxd->seq) {
+		ret = -EAGAIN;
+		goto out;
+	}
 
 	switch (cmd) {
 	case MCU_CMD_PATCH_SEM_CONTROL:
@@ -212,9 +217,18 @@ mt7615_mcu_parse_response(struct mt7615_dev *dev, int cmd,
 		ret = le32_to_cpu(event->status);
 		break;
 	}
+	case MCU_CMD_REG_READ: {
+		struct mt7615_mcu_reg_event *event;
+
+		skb_pull(skb, sizeof(*rxd));
+		event = (struct mt7615_mcu_reg_event *)skb->data;
+		ret = (int)le32_to_cpu(event->val);
+		break;
+	}
 	default:
 		break;
 	}
+out:
 	dev_kfree_skb(skb);
 
 	return ret;
@@ -1889,21 +1903,36 @@ static void mt7622_trigger_hif_int(struct mt7615_dev *dev, bool en)
 
 int mt7615_driver_own(struct mt7615_dev *dev)
 {
+	struct mt76_phy *mphy = &dev->mt76.phy;
 	struct mt76_dev *mdev = &dev->mt76;
-	u32 addr;
+	int i;
 
-	addr = is_mt7663(mdev) ? MT_PCIE_DOORBELL_PUSH : MT_CFG_LPCR_HOST;
-	mt76_wr(dev, addr, MT_CFG_LPCR_HOST_DRV_OWN);
+	if (!test_and_clear_bit(MT76_STATE_PM, &mphy->state))
+		goto out;
 
 	mt7622_trigger_hif_int(dev, true);
 
-	addr = is_mt7663(mdev) ? MT_CONN_HIF_ON_LPCTL : MT_CFG_LPCR_HOST;
-	if (!mt76_poll_msec(dev, addr, MT_CFG_LPCR_HOST_FW_OWN, 0, 3000)) {
-		dev_err(dev->mt76.dev, "Timeout for driver own\n");
-		return -EIO;
+	for (i = 0; i < MT7615_DRV_OWN_RETRY_COUNT; i++) {
+		u32 addr;
+
+		addr = is_mt7663(mdev) ? MT_PCIE_DOORBELL_PUSH : MT_CFG_LPCR_HOST;
+		mt76_wr(dev, addr, MT_CFG_LPCR_HOST_DRV_OWN);
+
+		addr = is_mt7663(mdev) ? MT_CONN_HIF_ON_LPCTL : MT_CFG_LPCR_HOST;
+		if (mt76_poll_msec(dev, addr, MT_CFG_LPCR_HOST_FW_OWN, 0, 50))
+			break;
 	}
 
 	mt7622_trigger_hif_int(dev, false);
+
+	if (i == MT7615_DRV_OWN_RETRY_COUNT) {
+		dev_err(mdev->dev, "driver own failed\n");
+		set_bit(MT76_STATE_PM, &mphy->state);
+		return -EIO;
+	}
+
+out:
+	dev->pm.last_activity = jiffies;
 
 	return 0;
 }
@@ -1911,22 +1940,29 @@ EXPORT_SYMBOL_GPL(mt7615_driver_own);
 
 int mt7615_firmware_own(struct mt7615_dev *dev)
 {
+	struct mt76_phy *mphy = &dev->mt76.phy;
+	int err = 0;
 	u32 addr;
 
-	addr = is_mt7663(&dev->mt76) ? MT_CONN_HIF_ON_LPCTL : MT_CFG_LPCR_HOST;
+	if (test_and_set_bit(MT76_STATE_PM, &mphy->state))
+		return 0;
+
 	mt7622_trigger_hif_int(dev, true);
 
+	addr = is_mt7663(&dev->mt76) ? MT_CONN_HIF_ON_LPCTL : MT_CFG_LPCR_HOST;
 	mt76_wr(dev, addr, MT_CFG_LPCR_HOST_FW_OWN);
 
-	if (!is_mt7615(&dev->mt76) &&
+	if (is_mt7622(&dev->mt76) &&
 	    !mt76_poll_msec(dev, addr, MT_CFG_LPCR_HOST_FW_OWN,
-			    MT_CFG_LPCR_HOST_FW_OWN, 3000)) {
+			    MT_CFG_LPCR_HOST_FW_OWN, 300)) {
 		dev_err(dev->mt76.dev, "Timeout for firmware own\n");
-		return -EIO;
+		clear_bit(MT76_STATE_PM, &mphy->state);
+		err = -EIO;
 	}
+
 	mt7622_trigger_hif_int(dev, false);
 
-	return 0;
+	return err;
 }
 EXPORT_SYMBOL_GPL(mt7615_firmware_own);
 
@@ -2906,21 +2942,20 @@ int mt7615_mcu_get_temperature(struct mt7615_dev *dev, int index)
 }
 
 int mt7615_mcu_set_test_param(struct mt7615_dev *dev, u8 param, bool test_mode,
-			      bool en)
+			      u32 val)
 {
 	struct {
 		u8 test_mode_en;
 		u8 param_idx;
 		u8 _rsv[2];
 
-		u8 enable;
-		u8 _rsv2[3];
+		__le32 value;
 
 		u8 pad[8];
 	} req = {
 		.test_mode_en = test_mode,
 		.param_idx = param,
-		.enable = en,
+		.value = cpu_to_le32(val),
 	};
 
 	return __mt76_mcu_send_msg(&dev->mt76, MCU_EXT_CMD_ATE_CTRL, &req,
@@ -3505,43 +3540,8 @@ out:
 	return ret;
 }
 
-#ifdef CONFIG_PM
-int mt7615_mcu_set_hif_suspend(struct mt7615_dev *dev, bool suspend)
-{
-	struct {
-		struct {
-			u8 hif_type; /* 0x0: HIF_SDIO
-				      * 0x1: HIF_USB
-				      * 0x2: HIF_PCIE
-				      */
-			u8 pad[3];
-		} __packed hdr;
-		struct hif_suspend_tlv {
-			__le16 tag;
-			__le16 len;
-			u8 suspend;
-		} __packed hif_suspend;
-	} req = {
-		.hif_suspend = {
-			.tag = cpu_to_le16(0), /* 0: UNI_HIF_CTRL_BASIC */
-			.len = cpu_to_le16(sizeof(struct hif_suspend_tlv)),
-			.suspend = suspend,
-		},
-	};
-
-	if (mt76_is_mmio(&dev->mt76))
-		req.hdr.hif_type = 2;
-	else if (mt76_is_usb(&dev->mt76))
-		req.hdr.hif_type = 1;
-
-	return __mt76_mcu_send_msg(&dev->mt76, MCU_UNI_CMD_HIF_CTRL,
-				   &req, sizeof(req), true);
-}
-EXPORT_SYMBOL_GPL(mt7615_mcu_set_hif_suspend);
-
-static int
-mt7615_mcu_set_bss_pm(struct mt7615_dev *dev, struct ieee80211_vif *vif,
-		      bool enable)
+int mt7615_mcu_set_bss_pm(struct mt7615_dev *dev, struct ieee80211_vif *vif,
+			  bool enable)
 {
 	struct mt7615_vif *mvif = (struct mt7615_vif *)vif->drv_priv;
 	struct {
@@ -3580,6 +3580,40 @@ mt7615_mcu_set_bss_pm(struct mt7615_dev *dev, struct ieee80211_vif *vif,
 	return __mt76_mcu_send_msg(&dev->mt76, MCU_CMD_SET_BSS_CONNECTED,
 				   &req, sizeof(req), false);
 }
+
+#ifdef CONFIG_PM
+int mt7615_mcu_set_hif_suspend(struct mt7615_dev *dev, bool suspend)
+{
+	struct {
+		struct {
+			u8 hif_type; /* 0x0: HIF_SDIO
+				      * 0x1: HIF_USB
+				      * 0x2: HIF_PCIE
+				      */
+			u8 pad[3];
+		} __packed hdr;
+		struct hif_suspend_tlv {
+			__le16 tag;
+			__le16 len;
+			u8 suspend;
+		} __packed hif_suspend;
+	} req = {
+		.hif_suspend = {
+			.tag = cpu_to_le16(0), /* 0: UNI_HIF_CTRL_BASIC */
+			.len = cpu_to_le16(sizeof(struct hif_suspend_tlv)),
+			.suspend = suspend,
+		},
+	};
+
+	if (mt76_is_mmio(&dev->mt76))
+		req.hdr.hif_type = 2;
+	else if (mt76_is_usb(&dev->mt76))
+		req.hdr.hif_type = 1;
+
+	return __mt76_mcu_send_msg(&dev->mt76, MCU_UNI_CMD_HIF_CTRL,
+				   &req, sizeof(req), true);
+}
+EXPORT_SYMBOL_GPL(mt7615_mcu_set_hif_suspend);
 
 static int
 mt7615_mcu_set_wow_ctrl(struct mt7615_phy *phy, struct ieee80211_vif *vif,
@@ -3921,3 +3955,32 @@ int mt7615_mcu_set_p2p_oppps(struct ieee80211_hw *hw,
 	return __mt76_mcu_send_msg(&dev->mt76, MCU_CMD_SET_P2P_OPPPS,
 				   &req, sizeof(req), false);
 }
+
+u32 mt7615_mcu_reg_rr(struct mt76_dev *dev, u32 offset)
+{
+	struct {
+		__le32 addr;
+		__le32 val;
+	} __packed req = {
+		.addr = cpu_to_le32(offset),
+	};
+
+	return __mt76_mcu_send_msg(dev, MCU_CMD_REG_READ,
+				   &req, sizeof(req), true);
+}
+EXPORT_SYMBOL_GPL(mt7615_mcu_reg_rr);
+
+void mt7615_mcu_reg_wr(struct mt76_dev *dev, u32 offset, u32 val)
+{
+	struct {
+		__le32 addr;
+		__le32 val;
+	} __packed req = {
+		.addr = cpu_to_le32(offset),
+		.val = cpu_to_le32(val),
+	};
+
+	__mt76_mcu_send_msg(dev, MCU_CMD_REG_WRITE,
+			    &req, sizeof(req), false);
+}
+EXPORT_SYMBOL_GPL(mt7615_mcu_reg_wr);
