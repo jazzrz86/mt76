@@ -361,7 +361,10 @@ mt7615_queue_key_update(struct mt7615_dev *dev, enum set_key_cmd cmd,
 	wd->key.keylen = key->keylen;
 	wd->key.cmd = cmd;
 
+	spin_lock_bh(&dev->mt76.lock);
 	list_add_tail(&wd->node, &dev->wd_head);
+	spin_unlock_bh(&dev->mt76.lock);
+
 	queue_work(dev->mt76.wq, &dev->wtbl_work);
 
 	return 0;
@@ -703,6 +706,7 @@ mt7615_wake_tx_queue(struct ieee80211_hw *hw, struct ieee80211_txq *txq)
 		return;
 	}
 
+	dev->pm.last_activity = jiffies;
 	tasklet_schedule(&dev->mt76.tx_tasklet);
 }
 
@@ -732,6 +736,7 @@ static void mt7615_tx(struct ieee80211_hw *hw,
 	}
 
 	if (!test_bit(MT76_STATE_PM, &mphy->state)) {
+		dev->pm.last_activity = jiffies;
 		mt76_tx(mphy, control->sta, wcid, skb);
 		return;
 	}
@@ -812,7 +817,6 @@ mt7615_ampdu_action(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
 	case IEEE80211_AMPDU_TX_START:
 		ssn = mt7615_mac_get_sta_tid_sn(dev, msta->wcid.idx, tid);
 		params->ssn = ssn;
-		mtxq->agg_ssn = IEEE80211_SN_TO_SEQ(ssn);
 		ieee80211_start_tx_ba_cb_irqsafe(vif, sta->addr, tid);
 		break;
 	case IEEE80211_AMPDU_TX_STOP_CONT:

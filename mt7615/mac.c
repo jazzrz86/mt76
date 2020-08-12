@@ -1439,10 +1439,14 @@ static void mt7615_mac_tx_free(struct mt7615_dev *dev, struct sk_buff *skb)
 
 	dev_kfree_skb(skb);
 
+	if (test_bit(MT76_STATE_PM, &dev->phy.mt76->state))
+		return;
+
 	rcu_read_lock();
 	mt7615_mac_sta_poll(dev);
 	rcu_read_unlock();
 
+	mt7615_pm_power_save_sched(dev);
 	tasklet_schedule(&dev->mt76.tx_tasklet);
 }
 
@@ -1845,7 +1849,7 @@ void mt7615_pm_wake_work(struct work_struct *work)
 						pm.wake_work);
 	mphy = dev->phy.mt76;
 
-	if (mt7615_driver_own(dev)) {
+	if (mt7615_mcu_set_drv_ctrl(dev)) {
 		dev_err(mphy->dev->dev, "failed to wake device\n");
 		goto out;
 	}
@@ -1943,7 +1947,7 @@ void mt7615_pm_power_save_work(struct work_struct *work)
 		goto out;
 	}
 
-	if (!mt7615_firmware_own(dev))
+	if (!mt7615_mcu_set_fw_ctrl(dev))
 		return;
 out:
 	queue_delayed_work(dev->mt76.wq, &dev->pm.ps_work, delta);

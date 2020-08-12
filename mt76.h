@@ -79,7 +79,8 @@ enum mt76_rxq_id {
 
 struct mt76_queue_buf {
 	dma_addr_t addr;
-	int len;
+	u16 len;
+	bool skip_unmap;
 };
 
 struct mt76_tx_info {
@@ -101,6 +102,7 @@ struct mt76_queue_entry {
 	};
 	enum mt76_txq_id qid;
 	bool skip_buf0:1;
+	bool skip_buf1:1;
 	bool schedule:1;
 	bool done:1;
 };
@@ -214,6 +216,7 @@ struct mt76_wcid {
 
 	u8 sta:1;
 	u8 ext_phy:1;
+	u8 amsdu:1;
 
 	u8 rx_check_pn;
 	u8 rx_key_pn[IEEE80211_NUM_TIDS][6];
@@ -309,6 +312,7 @@ struct mt76_hw_cap {
 #define MT_DRV_SW_RX_AIRTIME		BIT(2)
 #define MT_DRV_RX_DMA_HDR		BIT(3)
 #define MT_DRV_HW_MGMT_TXQ		BIT(4)
+#define MT_DRV_AMSDU_OFFLOAD		BIT(5)
 
 struct mt76_driver_ops {
 	u32 drv_flags;
@@ -447,11 +451,17 @@ struct mt76_usb {
 };
 
 struct mt76_sdio {
-	struct task_struct *tx_kthread;
-	struct task_struct *kthread;
-	struct work_struct stat_work;
+	struct workqueue_struct *txrx_wq;
+	struct {
+		struct work_struct xmit_work;
+		struct work_struct status_work;
+	} tx;
+	struct {
+		struct work_struct recv_work;
+		struct work_struct net_work;
+	} rx;
 
-	unsigned long state;
+	struct work_struct stat_work;
 
 	struct sdio_func *func;
 
@@ -906,6 +916,7 @@ void mt76_txq_remove(struct mt76_dev *dev, struct ieee80211_txq *txq);
 void mt76_wake_tx_queue(struct ieee80211_hw *hw, struct ieee80211_txq *txq);
 void mt76_stop_tx_queues(struct mt76_dev *dev, struct ieee80211_sta *sta,
 			 bool send_bar);
+void mt76_tx_check_agg_ssn(struct ieee80211_sta *sta, struct sk_buff *skb);
 void mt76_txq_schedule(struct mt76_phy *phy, enum mt76_txq_id qid);
 void mt76_txq_schedule_all(struct mt76_phy *phy);
 void mt76_tx_tasklet(unsigned long data);

@@ -58,13 +58,6 @@ enum mt7915_rxq_id {
 	MT7915_RXQ_MCU_WA,
 };
 
-enum mt7915_ampdu_state {
-	MT7915_AGGR_STOP,
-	MT7915_AGGR_PROGRESS,
-	MT7915_AGGR_START,
-	MT7915_AGGR_OPERATIONAL
-};
-
 struct mt7915_sta_stats {
 	struct rate_info prob_rate;
 	struct rate_info tx_rate;
@@ -79,14 +72,14 @@ struct mt7915_sta {
 
 	struct mt7915_vif *vif;
 
+	struct list_head stats_list;
 	struct list_head poll_list;
+	struct list_head rc_list;
 	u32 airtime_ac[8];
 
 	struct mt7915_sta_stats stats;
-	struct work_struct stats_work;
 
-	spinlock_t ampdu_lock;
-	enum mt7915_ampdu_state ampdu_state[IEEE80211_NUM_TIDS];
+	unsigned long ampdu_state;
 };
 
 struct mt7915_vif {
@@ -96,7 +89,7 @@ struct mt7915_vif {
 	u8 wmm_idx;
 
 	struct mt7915_sta sta;
-	struct mt7915_dev *dev;
+	struct mt7915_phy *phy;
 
 	struct ieee80211_tx_queue_params queue_params[IEEE80211_NUM_ACS];
 };
@@ -131,9 +124,11 @@ struct mt7915_phy {
 	u32 ampdu_ref;
 
 	struct mib_stats mib;
+	struct list_head stats_list;
 
 	struct delayed_work mac_work;
 	u8 mac_work_count;
+	u8 sta_work_count;
 };
 
 struct mt7915_dev {
@@ -147,10 +142,12 @@ struct mt7915_dev {
 	u16 chainmask;
 
 	struct work_struct init_work;
+	struct work_struct rc_work;
 	struct work_struct reset_work;
 	wait_queue_head_t reset_wait;
 	u32 reset_state;
 
+	struct list_head sta_rc_list;
 	struct list_head sta_poll_list;
 	spinlock_t sta_poll_lock;
 
@@ -265,15 +262,6 @@ static inline u8 mt7915_lmac_mapping(struct mt7915_dev *dev, u8 ac)
 		return MT_LMAC_AC01; /* BE */
 
 	return lmac_queue_map[ac];
-}
-
-static inline void
-mt7915_set_aggr_state(struct mt7915_sta *msta, u8 tid,
-		      enum mt7915_ampdu_state state)
-{
-	spin_lock_bh(&msta->ampdu_lock);
-	msta->ampdu_state[tid] = state;
-	spin_unlock_bh(&msta->ampdu_lock);
 }
 
 extern const struct ieee80211_ops mt7915_ops;
@@ -455,7 +443,7 @@ void mt7915_mac_sta_remove(struct mt76_dev *mdev, struct ieee80211_vif *vif,
 			   struct ieee80211_sta *sta);
 void mt7915_mac_work(struct work_struct *work);
 void mt7915_mac_reset_work(struct work_struct *work);
-void mt7915_mac_sta_stats_work(struct work_struct *work);
+void mt7915_mac_sta_rc_work(struct work_struct *work);
 int mt7915_tx_prepare_skb(struct mt76_dev *mdev, void *txwi_ptr,
 			  enum mt76_txq_id qid, struct mt76_wcid *wcid,
 			  struct ieee80211_sta *sta,
